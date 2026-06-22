@@ -1334,14 +1334,21 @@ var GS_API = 'https://script.google.com/macros/s/AKfycbwqX-1YiebJFf35E1QmjTa_iCd
 function gsGet(action,params){params=params||{};var url=GS_API+'?action='+action;Object.keys(params).forEach(function(k){url+='&'+k+'='+encodeURIComponent(typeof params[k]==='object'?JSON.stringify(params[k]):params[k]);});return fetch(url).then(function(r){return r.json();});}
 function gsPost(action,data){return fetch(GS_API+'?action='+action+'&data='+encodeURIComponent(JSON.stringify(data))).then(function(r){return r.json();});}
 function showSaveStatus(msg,isError){var el=document.getElementById('gs-save-status');if(!el)return;el.textContent=msg;el.style.color=isError?'#DC2626':'#059669';el.style.opacity='1';setTimeout(function(){el.style.opacity='0';},2500);}
+// 저장 진행 중 폴링 차단 플래그
+var _savingEmployee = false;
+
 function gsSaveEmployee(name){
   var emp=(typeof employeeData!=='undefined')?employeeData.find(function(e){return e.name===name;}):null;
   if(!emp)return;
-  // gsPost는 두 번째 스크립트 블록에 정의된 것을 사용 (GS_API 최신 URL 참조)
   if(typeof gsPost!=='function'){showSaveStatus('❌ 저장 오류(초기화 전)',true);return;}
+  _savingEmployee = true; // 저장 시작 → 폴링 차단
   gsPost('saveEmployee',emp).then(function(r){
     showSaveStatus(r.ok?'✅ '+name+' 저장됨':'❌ 저장 실패: '+(r.error||''),!r.ok);
-  }).catch(function(err){showSaveStatus('❌ 저장 오류: '+err,true);});
+  }).catch(function(err){
+    showSaveStatus('❌ 저장 오류: '+err,true);
+  }).finally(function(){
+    _savingEmployee = false; // 저장 완료 → 폴링 재개
+  });
 }
 function getCurrentYm() {
   var sel = document.getElementById('monthFilter');
@@ -4565,9 +4572,11 @@ function gsLoadAll(silent) {
         nd.forEach(function(ed) {
           var empS = employees.find(function(e){ return e.name === ed.name; });
           if (empS) {
-            empS.store = ed.store; empS.rank = ed.position || empS.rank;
-            empS.dept = ed.dept; empS.joinDate = ed.joinDate || empS.joinDate;
-            empS.leaveDate = ed.leaveDate || '';
+            if (ed.store)    empS.store    = ed.store;  // 빈 값으로 덮어쓰지 않음
+            empS.rank      = ed.position || empS.rank;
+            if (ed.dept)     empS.dept     = ed.dept;
+            if (ed.joinDate) empS.joinDate = ed.joinDate;
+            empS.leaveDate = ed.leaveDate || '';         // 퇴사일은 빈 값도 허용(퇴사 취소 반영)
           } else {
             employees.push({ name:ed.name, rank:ed.position||'', store:ed.store||'',
               dept:ed.dept||'', joinDate:ed.joinDate||'', leaveDate:ed.leaveDate||'',
@@ -4598,13 +4607,15 @@ function gsLoadAll(silent) {
         var matched = shiftMap[emp.name + '||' + emp.store];
         if (!matched) matched = shiftMap[emp.name] || shiftMap[emp.name.replace(/\s/g,'')];
         if (!matched) {
+          // 이름 공백 차이 + store 불일치 모두 방어: 이름만으로 전체 키 탐색
           var k2 = Object.keys(shiftMap).find(function(k){
             return k.split('||')[0].replace(/\s/g,'') === emp.name.replace(/\s/g,'');
           });
           if (k2) matched = shiftMap[k2];
         }
+        // 퇴사일 입력된 직원도 시프트 데이터 그대로 표시 (빈칸 아닌 실제 데이터)
         emp.shifts = matched || new Array(daysInMonth).fill('');
-        if (!matched && emp.store) console.log('[시프트 미매칭]', emp.name, emp.store);
+        if (!matched && emp.store) console.log('[시프트 미매칭]', emp.name, emp.store, '| keys:', Object.keys(shiftMap).filter(function(k){ return k.indexOf(emp.name.replace(/\s/g,''))>-1; }));
       });
     }
     buildBody(sortByStore(employees));
@@ -4767,8 +4778,9 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }, 3000);
 
-  // 10초마다 자동 갱신 (다른 사람이 수정한 내용 반영, 매장↔관리자 동기화 지연 단축)
+  // 10초마다 자동 갱신 (저장 진행 중에는 건너뜀)
   setInterval(function() {
+    if (_savingEmployee) return; // 직원 저장 중에는 폴링 차단
     if (typeof gsLoadAll === 'function') gsLoadAll(true);
   }, 10000);
 });
