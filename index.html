@@ -525,6 +525,11 @@ function showLeavePage() {
   _openOv("leave-overlay");
   setActiveNav("nav-leave");
   loadLeaveManager();
+  // 필터/페이지 초기화
+  _leavePage = 1;
+  var s = document.getElementById('leave-filter'); if(s) s.value = 'all';
+  var f = document.getElementById('leave-from'); if(f) f.value = '';
+  var t = document.getElementById('leave-to');   if(t) t.value = '';
   // Sheets에서 최신 휴가 데이터 로드
   if (typeof gsGet === 'function') {
     gsGet('getLeaves').then(function(r) {
@@ -543,10 +548,10 @@ function showLeavePage() {
           };
         }).filter(function(l){ return l.name; });
       }
-      renderLeaveList();
-    }).catch(function() { renderLeaveList(); });
+      renderLeaveList(1);
+    }).catch(function() { renderLeaveList(1); });
   } else {
-    renderLeaveList();
+    renderLeaveList(1);
   }
 }
 var _leavePage = 1;
@@ -1368,7 +1373,25 @@ window.showAlarmPage = window.showAlarmPage || function(){ showAlarmPage(); };
 <script>
 
 // ── Google Sheets 핵심 함수 (최우선 정의) ────────────────────────────────
-var GS_API = 'https://script.google.com/macros/s/AKfycbwGlmJLOtlIr-uh2ylPEAqGbsB7ngz_6_-pyvGRngXEI35jKYfeSIyuKjNz9yi1k-OK/exec';
+var GS_API = 'https://script.google.com/macros/s/AKfycbzdq9J0StSp_g6m0d9JlnMc4OuOwy3i3Aw_Gub3rNlqR7ji-7UK3XYcxSu6E-FV322a/exec';
+// 날짜 문자열을 한국시간(KST) 기준 YYYY-MM-DD로 변환
+// Sheets에서 날짜형 셀은 UTC ISO 문자열로 옴 (예: 2026-06-14T15:00:00.000Z = KST 2026-06-15)
+function normalizeSheetDate(val) {
+  if (!val) return '';
+  var s = String(val).replace(/^'/, '');
+  if (!s || s === 'undefined') return '';
+  // ISO 형식(T 포함)이면 KST(+9) 보정
+  if (s.indexOf('T') > -1) {
+    var d = new Date(s);
+    if (!isNaN(d)) {
+      // UTC 시간에 9시간 더해서 KST 날짜 추출
+      var kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
+      return kst.toISOString().slice(0, 10);
+    }
+  }
+  return s.replace(/T.*$/, '').slice(0, 10);
+}
+
 function gsGet(action,params){params=params||{};var url=GS_API+'?action='+action;Object.keys(params).forEach(function(k){url+='&'+k+'='+encodeURIComponent(typeof params[k]==='object'?JSON.stringify(params[k]):params[k]);});return fetch(url).then(function(r){return r.json();});}
 function gsPost(action,data){return fetch(GS_API+'?action='+action+'&data='+encodeURIComponent(JSON.stringify(data))).then(function(r){return r.json();});}
 function showSaveStatus(msg,isError){var el=document.getElementById('gs-save-status');if(!el)return;el.textContent=msg;el.style.color=isError?'#DC2626':'#059669';el.style.opacity='1';setTimeout(function(){el.style.opacity='0';},2500);}
@@ -2285,7 +2308,7 @@ function showEmpPage() {
           ed.store=String(r[2]||'');
           ed.dept=String(r[3]||'');
           ed.position=String(r[4]||'');
-          var sheetJoin = String(r[5]||'').replace(/T.*$/,'').slice(0,10);
+          var sheetJoin = normalizeSheetDate(r[5]);
           if (sheetJoin) ed.joinDate = sheetJoin; // 입사일은 Sheets 값이 있을 때만 갱신 (보존)
           ed.leaveDate=String(r[6]||'').replace(/T.*$/,'').slice(0,10);
           ed.birthYear=String(r[7]||'');
@@ -4536,7 +4559,7 @@ function renderDashboard() {
 // ══════════════════════════════════════════════════════════════════
 //  Google Sheets 연동 (데이터 실시간 공유 & 자동저장)
 // ══════════════════════════════════════════════════════════════════
-var GS_API = 'https://script.google.com/macros/s/AKfycbwGlmJLOtlIr-uh2ylPEAqGbsB7ngz_6_-pyvGRngXEI35jKYfeSIyuKjNz9yi1k-OK/exec';
+var GS_API = 'https://script.google.com/macros/s/AKfycbzdq9J0StSp_g6m0d9JlnMc4OuOwy3i3Aw_Gub3rNlqR7ji-7UK3XYcxSu6E-FV322a/exec';
 var GS_SAVING = false;  // 저장 중 표시
 
 // ── 공통 fetch 헬퍼 ───────────────────────────────────────────────
@@ -4575,20 +4598,23 @@ function gsLoadAll(silent) {
       var curYm = getCurrentYm();
       var shiftMap = {};
       shiftRes.data.forEach(function(r){
-        var name = String(r[0]||'');
+        var name  = String(r[0]||'');
+        var store = String(r[1]||'');
         var ym   = String(r[2]||'').replace(/^'/,'').replace(/T.*$/,'').slice(0,7);
         if (ym.match(/^[A-Za-z]/)) {
           var d2 = new Date(String(r[2]));
           if (!isNaN(d2)) ym = d2.getFullYear()+'-'+String(d2.getMonth()+1).padStart(2,'0');
         }
         if (ym !== curYm) return;
-        shiftMap[name] = r.slice(3).map(function(s){ return String(s||'근무'); });
+        // key를 이름+매장으로 저장 (매장 변경 시 이전 매장 데이터가 덮어쓰는 문제 방지)
+        shiftMap[name + '::' + store] = r.slice(3).map(function(s){ return String(s||'근무'); });
       });
       // 해당 월 데이터 없는 직원은 빈 칸으로 표시 (근무로 자동 채우지 않음)
       var daysInMonth = new Date(parseInt(curYm.split('-')[0]), parseInt(curYm.split('-')[1]), 0).getDate();
       employees.forEach(function(emp) {
-        if (shiftMap[emp.name]) {
-          emp.shifts = shiftMap[emp.name];
+        var key = emp.name + '::' + emp.store;
+        if (shiftMap[key]) {
+          emp.shifts = shiftMap[key];
         } else {
           emp.shifts = new Array(daysInMonth).fill('');
         }
@@ -4615,8 +4641,8 @@ function gsLoadAll(silent) {
       // Sheets에서 받은 전체 직원 목록으로 employees 배열 재구성
       var newEmployees = empRes.data.map(function(r) {
         var name = String(r[1]||'');
-        var sheetJoin  = String(r[5]||'').replace(/T.*$/,'').slice(0,10);
-        var sheetLeave = String(r[6]||'').replace(/T.*$/,'').slice(0,10);
+        var sheetJoin  = normalizeSheetDate(r[5]);
+        var sheetLeave = normalizeSheetDate(r[6]);
         // 기존 employees에 shifts 데이터가 있으면 유지
         var existing = employees.find(function(e){ return e.name === name; });
         return {
@@ -4639,8 +4665,8 @@ function gsLoadAll(silent) {
       // employeeData도 동기화
       var nd2 = empRes.data.map(function(r){
         var name = String(r[1]||'');
-        var sheetJoin  = String(r[5]||'').replace(/T.*$/,'').slice(0,10);
-        var sheetLeave = String(r[6]||'').replace(/T.*$/,'').slice(0,10);
+        var sheetJoin  = normalizeSheetDate(r[5]);
+        var sheetLeave = normalizeSheetDate(r[6]);
         return {
           empNo:String(r[0]||''), name:name, store:String(r[2]||''),
           dept:String(r[3]||''), position:String(r[4]||''),
